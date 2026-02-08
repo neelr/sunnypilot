@@ -59,33 +59,36 @@ HTML_PAGE = """
             padding: 20px;
             background: #1a1a1a;
         }
-        .slider-container {
+        .key-controls {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            gap: 30px;
+        }
+        .key-indicator {
+            font-size: 48px;
+            width: 80px;
+            height: 80px;
             display: flex;
             align-items: center;
-            gap: 15px;
-        }
-        input[type="range"] {
-            flex: 1;
-            height: 50px;
-            -webkit-appearance: none;
+            justify-content: center;
             background: #333;
-            border-radius: 25px;
-            outline: none;
+            border-radius: 12px;
+            transition: all 0.1s;
+            user-select: none;
         }
-        input[type="range"]::-webkit-slider-thumb {
-            -webkit-appearance: none;
-            width: 70px;
-            height: 70px;
+        .key-indicator.active {
             background: #4CAF50;
-            border-radius: 50%;
-            cursor: pointer;
+            color: #000;
+            transform: scale(1.1);
+            box-shadow: 0 0 20px rgba(76, 175, 80, 0.5);
         }
-        .value {
-            font-size: 36px;
+        .torque-value {
+            font-size: 48px;
             font-weight: bold;
             font-family: monospace;
             color: #4CAF50;
-            min-width: 80px;
+            min-width: 120px;
             text-align: center;
         }
         .status {
@@ -108,6 +111,19 @@ HTML_PAGE = """
             cursor: pointer;
         }
         button:hover { background: #1976D2; }
+        .telemetry {
+            display: flex;
+            justify-content: center;
+            gap: 30px;
+            margin-top: 10px;
+            font-size: 18px;
+            font-family: monospace;
+        }
+        .telemetry span {
+            padding: 5px 15px;
+            background: #333;
+            border-radius: 5px;
+        }
     </style>
 </head>
 <body>
@@ -117,13 +133,16 @@ HTML_PAGE = """
     </div>
 
     <div class="controls">
-        <div class="slider-container">
-            <span style="font-size: 24px;">L</span>
-            <input type="range" id="steer" min="-100" max="100" value="0">
-            <span style="font-size: 24px;">R</span>
-            <div class="value" id="steerValue">0.00</div>
+        <div class="key-controls">
+            <div class="key-indicator" id="keyLeft">\u2190</div>
+            <div class="torque-value" id="steerValue">0.00</div>
+            <div class="key-indicator" id="keyRight">\u2192</div>
         </div>
         <div class="status" id="status">Connecting...</div>
+        <div class="telemetry">
+            <span id="steerAngle">Steer: --</span>
+            <span id="brakeStatus">Brake: --</span>
+        </div>
     </div>
 
     <script>
@@ -132,22 +151,49 @@ HTML_PAGE = """
         let steerValue = 0;
         let sendInterval = null;
 
-        const steerSlider = document.getElementById('steer');
+        // Keyboard state
+        let keysPressed = { left: false, right: false };
+        const RAMP_RATE = 0.016;    // ~1s to full at 60fps
+        const RETURN_RATE = 0.025;  // ~0.6s return to center
+
         const steerDisplay = document.getElementById('steerValue');
         const status = document.getElementById('status');
         const video = document.getElementById('video');
         const driver = document.getElementById('driver');
+        const keyLeft = document.getElementById('keyLeft');
+        const keyRight = document.getElementById('keyRight');
 
-        function updateSteer() {
-            steerValue = steerSlider.value / 100;
+        // Keyboard event handlers
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'ArrowLeft') { keysPressed.left = true; e.preventDefault(); }
+            if (e.key === 'ArrowRight') { keysPressed.right = true; e.preventDefault(); }
+            if (e.code === 'Space') { steerValue = 0; e.preventDefault(); }
+        });
+
+        document.addEventListener('keyup', (e) => {
+            if (e.key === 'ArrowLeft') keysPressed.left = false;
+            if (e.key === 'ArrowRight') keysPressed.right = false;
+        });
+
+        // Animation loop for smooth ramping
+        function updateLoop() {
+            let targetTorque = 0;
+            if (keysPressed.left && !keysPressed.right) targetTorque = -1;
+            else if (keysPressed.right && !keysPressed.left) targetTorque = 1;
+
+            if (steerValue < targetTorque) {
+                steerValue = Math.min(steerValue + RAMP_RATE, targetTorque);
+            } else if (steerValue > targetTorque) {
+                steerValue = Math.max(steerValue - RETURN_RATE, targetTorque);
+            }
+
             steerDisplay.textContent = steerValue.toFixed(2);
+            keyLeft.classList.toggle('active', keysPressed.left);
+            keyRight.classList.toggle('active', keysPressed.right);
+
+            requestAnimationFrame(updateLoop);
         }
-
-        steerSlider.addEventListener('input', updateSteer);
-
-        // Return to center on release
-        steerSlider.addEventListener('mouseup', () => { steerSlider.value = 0; updateSteer(); });
-        steerSlider.addEventListener('touchend', () => { steerSlider.value = 0; updateSteer(); });
+        requestAnimationFrame(updateLoop);
 
         function setStatus(msg, type) {
             status.textContent = msg;
@@ -206,6 +252,16 @@ HTML_PAGE = """
                     clearInterval(sendInterval);
                     setStatus('Data channel closed', 'error');
                 };
+                dc.onmessage = (evt) => {
+                    const msg = JSON.parse(new TextDecoder().decode(evt.data));
+                    if (msg.type === 'carState') {
+                        document.getElementById('steerAngle').textContent =
+                            'Steer: ' + msg.data.steeringAngleDeg.toFixed(1) + '\u00B0';
+                        const brakeEl = document.getElementById('brakeStatus');
+                        brakeEl.textContent = 'Brake: ' + (msg.data.brakePressed ? 'ON' : 'OFF');
+                        brakeEl.style.color = msg.data.brakePressed ? '#f44336' : '#4CAF50';
+                    }
+                };
 
                 // Create offer (transceivers already added above)
                 const offer = await pc.createOffer();
@@ -259,7 +315,7 @@ async def index(request: web.Request):
 async def offer(request: web.Request):
     try:
         params = await request.json()
-        body = StreamRequestBody(params["sdp"], ["road", "driver"], ["testJoystick"], [])
+        body = StreamRequestBody(params["sdp"], ["road", "driver"], ["testJoystick"], ["carState"])
         body_json = json.dumps(asdict(body))
 
         logger.info("Sending offer to webrtcd...")

@@ -19,7 +19,8 @@ def joystickd_thread():
   CP = messaging.log_from_bytes(params.get("CarParams", block=True), car.CarParams)
   VM = VehicleModel(CP)
 
-  sm = messaging.SubMaster(['carState', 'onroadEvents', 'liveParameters', 'selfdriveState', 'selfdriveStateSP', 'testJoystick'], frequency=1. / DT_CTRL)
+  sm = messaging.SubMaster(['carState', 'onroadEvents', 'liveParameters', 'selfdriveState', 'selfdriveStateSP', 'testJoystick'],
+                           poll='selfdriveState')
   pm = messaging.PubMaster(['carControl', 'controlsState'])
 
   rk = Ratekeeper(100, print_delay_threshold=None)
@@ -30,8 +31,9 @@ def joystickd_thread():
     cc_msg.valid = True
     CC = cc_msg.carControl
     CC.enabled = sm['selfdriveState'].enabled
-    # Use MADS for lateral activation (allows steering without full openpilot engagement)
+
     CC.latActive = sm['selfdriveStateSP'].mads.active and not sm['carState'].steerFaultTemporary and not sm['carState'].steerFaultPermanent
+
     CC.longActive = CC.enabled and not any(e.overrideLongitudinal for e in sm['onroadEvents']) and CP.openpilotLongitudinalControl
     CC.cruiseControl.cancel = sm['carState'].cruiseState.enabled and (not CC.enabled or not CP.pcmCruise)
     CC.hudControl.leadDistanceBars = 2
