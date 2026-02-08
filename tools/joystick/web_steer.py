@@ -1,0 +1,294 @@
+#!/usr/bin/env python3
+"""
+Web-based steering control with WebRTC video for openpilot.
+Run on comma device, access via browser at http://<device-ip>:3000
+"""
+
+import json
+import logging
+from dataclasses import asdict
+
+from aiohttp import web, ClientSession
+
+from openpilot.system.webrtc.webrtcd import StreamRequestBody
+
+logger = logging.getLogger("web_steer")
+logging.basicConfig(level=logging.INFO)
+
+WEBRTCD_HOST, WEBRTCD_PORT = "localhost", 5001
+
+HTML_PAGE = """
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Steering Control</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+        * { box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+            background: #000;
+            color: #fff;
+            margin: 0;
+            padding: 0;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+        .video-container {
+            flex: 1;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: #111;
+            overflow: hidden;
+        }
+        video#video {
+            max-width: 100%;
+            max-height: 100%;
+        }
+        video#driver {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            width: 180px;
+            border: 2px solid #4CAF50;
+            border-radius: 8px;
+        }
+        .controls {
+            padding: 20px;
+            background: #1a1a1a;
+        }
+        .slider-container {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+        }
+        input[type="range"] {
+            flex: 1;
+            height: 50px;
+            -webkit-appearance: none;
+            background: #333;
+            border-radius: 25px;
+            outline: none;
+        }
+        input[type="range"]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            width: 70px;
+            height: 70px;
+            background: #4CAF50;
+            border-radius: 50%;
+            cursor: pointer;
+        }
+        .value {
+            font-size: 36px;
+            font-weight: bold;
+            font-family: monospace;
+            color: #4CAF50;
+            min-width: 80px;
+            text-align: center;
+        }
+        .status {
+            margin-top: 10px;
+            padding: 8px 15px;
+            background: #333;
+            border-radius: 5px;
+            font-size: 14px;
+            text-align: center;
+        }
+        .status.connected { background: #2e7d32; }
+        .status.error { background: #c62828; }
+        button {
+            padding: 12px 30px;
+            font-size: 16px;
+            background: #2196F3;
+            color: white;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+        }
+        button:hover { background: #1976D2; }
+    </style>
+</head>
+<body>
+    <div class="video-container">
+        <video id="video" autoplay playsinline muted></video>
+        <video id="driver" autoplay playsinline muted></video>
+    </div>
+
+    <div class="controls">
+        <div class="slider-container">
+            <span style="font-size: 24px;">L</span>
+            <input type="range" id="steer" min="-100" max="100" value="0">
+            <span style="font-size: 24px;">R</span>
+            <div class="value" id="steerValue">0.00</div>
+        </div>
+        <div class="status" id="status">Connecting...</div>
+    </div>
+
+    <script>
+        let pc = null;
+        let dc = null;
+        let steerValue = 0;
+        let sendInterval = null;
+
+        const steerSlider = document.getElementById('steer');
+        const steerDisplay = document.getElementById('steerValue');
+        const status = document.getElementById('status');
+        const video = document.getElementById('video');
+        const driver = document.getElementById('driver');
+
+        function updateSteer() {
+            steerValue = steerSlider.value / 100;
+            steerDisplay.textContent = steerValue.toFixed(2);
+        }
+
+        steerSlider.addEventListener('input', updateSteer);
+
+        // Return to center on release
+        steerSlider.addEventListener('mouseup', () => { steerSlider.value = 0; updateSteer(); });
+        steerSlider.addEventListener('touchend', () => { steerSlider.value = 0; updateSteer(); });
+
+        function setStatus(msg, type) {
+            status.textContent = msg;
+            status.className = 'status ' + (type || '');
+        }
+
+        function sendControls() {
+            if (dc && dc.readyState === 'open') {
+                dc.send(JSON.stringify({
+                    type: "testJoystick",
+                    data: { axes: [0, -steerValue], buttons: [false] }
+                }));
+            }
+        }
+
+        async function start() {
+            try {
+                setStatus('Creating connection...');
+
+                pc = new RTCPeerConnection({ sdpSemantics: 'unified-plan' });
+
+                // Add 2 transceivers for 2 video tracks (road + driver)
+                pc.addTransceiver('video', { direction: 'recvonly' });
+                pc.addTransceiver('video', { direction: 'recvonly' });
+
+                // Handle incoming video tracks - create separate MediaStream for each track
+                pc.addEventListener('track', (evt) => {
+                    if (evt.track.kind === 'video') {
+                        const mid = evt.transceiver.mid;
+                        const stream = new MediaStream([evt.track]);
+                        console.log('Track received, mid:', mid, 'track id:', evt.track.id);
+                        // First transceiver (mid=0) is road, second (mid=1) is driver
+                        if (mid === '0') {
+                            video.srcObject = stream;
+                            setStatus('Road camera connected', 'connected');
+                        } else if (mid === '1') {
+                            driver.srcObject = stream;
+                            setStatus('Both cameras connected', 'connected');
+                        }
+                    }
+                });
+
+                pc.addEventListener('connectionstatechange', () => {
+                    if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed') {
+                        setStatus('Connection lost', 'error');
+                    }
+                });
+
+                // Create data channel for controls
+                dc = pc.createDataChannel('data', { ordered: true });
+                dc.onopen = () => {
+                    setStatus('Connected - steering active', 'connected');
+                    sendInterval = setInterval(sendControls, 50);
+                };
+                dc.onclose = () => {
+                    clearInterval(sendInterval);
+                    setStatus('Data channel closed', 'error');
+                };
+
+                // Create offer (transceivers already added above)
+                const offer = await pc.createOffer();
+                await pc.setLocalDescription(offer);
+
+                // Wait for ICE gathering
+                await new Promise((resolve) => {
+                    if (pc.iceGatheringState === 'complete') {
+                        resolve();
+                    } else {
+                        pc.addEventListener('icegatheringstatechange', () => {
+                            if (pc.iceGatheringState === 'complete') resolve();
+                        });
+                    }
+                });
+
+                setStatus('Negotiating...');
+
+                // Send offer to server
+                const response = await fetch('/offer', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ sdp: pc.localDescription.sdp, type: pc.localDescription.type })
+                });
+
+                if (!response.ok) throw new Error('Offer failed: ' + response.status);
+
+                const answer = await response.json();
+                await pc.setRemoteDescription(answer);
+
+                setStatus('Waiting for video...', 'connected');
+
+            } catch (err) {
+                setStatus('Error: ' + err.message, 'error');
+                console.error(err);
+            }
+        }
+
+        // Start on page load
+        start();
+    </script>
+</body>
+</html>
+"""
+
+
+async def index(request: web.Request):
+    return web.Response(content_type="text/html", text=HTML_PAGE)
+
+
+async def offer(request: web.Request):
+    try:
+        params = await request.json()
+        body = StreamRequestBody(params["sdp"], ["road", "driver"], ["testJoystick"], [])
+        body_json = json.dumps(asdict(body))
+
+        logger.info("Sending offer to webrtcd...")
+        webrtcd_url = f"http://{WEBRTCD_HOST}:{WEBRTCD_PORT}/stream"
+
+        async with ClientSession() as session:
+            async with session.post(webrtcd_url, data=body_json) as resp:
+                if resp.status != 200:
+                    error_text = await resp.text()
+                    logger.error(f"webrtcd error: {error_text}")
+                    return web.json_response({"error": error_text}, status=500)
+                answer = await resp.json()
+                return web.json_response(answer)
+    except Exception as e:
+        logger.exception("Offer failed")
+        return web.json_response({"error": str(e)}, status=500)
+
+
+def main():
+    print("Starting web steering control with WebRTC...")
+    print("Access at http://localhost:3000")
+    print("Make sure webrtcd and encoderd --stream are running!")
+
+    app = web.Application()
+    app.router.add_get("/", index)
+    app.router.add_post("/offer", offer)
+
+    web.run_app(app, host="0.0.0.0", port=3000, access_log=None)
+
+
+if __name__ == "__main__":
+    main()
