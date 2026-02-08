@@ -3,7 +3,7 @@
 import math
 import numpy as np
 
-from cereal import messaging, car
+from cereal import messaging, car, custom
 from opendbc.car.vehicle_model import VehicleModel
 from openpilot.common.realtime import DT_CTRL, Ratekeeper
 from openpilot.common.params import Params
@@ -20,8 +20,8 @@ def joystickd_thread():
   VM = VehicleModel(CP)
 
   sm = messaging.SubMaster(['carState', 'onroadEvents', 'liveParameters', 'selfdriveState', 'selfdriveStateSP', 'testJoystick'],
-                           poll='selfdriveState')
-  pm = messaging.PubMaster(['carControl', 'controlsState'])
+                           frequency=1. / DT_CTRL)
+  pm = messaging.PubMaster(['carControl', 'controlsState', 'carControlSP'])
 
   rk = Ratekeeper(100, print_delay_threshold=None)
   while 1:
@@ -32,8 +32,14 @@ def joystickd_thread():
     CC = cc_msg.carControl
     CC.enabled = sm['selfdriveState'].enabled
 
-    CC.latActive = sm['selfdriveStateSP'].mads.active and not sm['carState'].steerFaultTemporary and not sm['carState'].steerFaultPermanent
+    # Use MADS for lateral activation if available
+    ss_sp = sm['selfdriveStateSP']
+    if ss_sp.mads.available:
+      lat_active = ss_sp.mads.active
+    else:
+      lat_active = sm['selfdriveState'].active
 
+    CC.latActive = lat_active and not sm['carState'].steerFaultTemporary and not sm['carState'].steerFaultPermanent
     CC.longActive = CC.enabled and not any(e.overrideLongitudinal for e in sm['onroadEvents']) and CP.openpilotLongitudinalControl
     CC.cruiseControl.cancel = sm['carState'].cruiseState.enabled and (not CC.enabled or not CP.pcmCruise)
     CC.hudControl.leadDistanceBars = 2
@@ -61,6 +67,13 @@ def joystickd_thread():
       actuators.steeringAngleDeg, actuators.curvature = actuators.torque * max_angle, actuators.torque * -max_curvature
 
     pm.send('carControl', cc_msg)
+
+    # Publish carControlSP with MADS state
+    cc_sp_msg = messaging.new_message('carControlSP')
+    cc_sp_msg.valid = sm['carState'].canValid
+    CC_SP = cc_sp_msg.carControlSP
+    CC_SP.mads = ss_sp.mads
+    pm.send('carControlSP', cc_sp_msg)
 
     cs_msg = messaging.new_message('controlsState')
     cs_msg.valid = True

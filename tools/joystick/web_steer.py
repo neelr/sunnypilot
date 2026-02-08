@@ -140,7 +140,9 @@ HTML_PAGE = """
         </div>
         <div class="status" id="status">Connecting...</div>
         <div class="telemetry">
+            <span id="speed">Speed: --</span>
             <span id="steerAngle">Steer: --</span>
+            <span id="gasStatus">Gas: --</span>
             <span id="brakeStatus">Brake: --</span>
         </div>
     </div>
@@ -255,11 +257,16 @@ HTML_PAGE = """
                 dc.onmessage = (evt) => {
                     const msg = JSON.parse(new TextDecoder().decode(evt.data));
                     if (msg.type === 'carState') {
+                        document.getElementById('speed').textContent =
+                            'Speed: ' + (msg.data.vEgo * 2.237).toFixed(1) + ' mph';
                         document.getElementById('steerAngle').textContent =
                             'Steer: ' + msg.data.steeringAngleDeg.toFixed(1) + '\u00B0';
+                        const gasEl = document.getElementById('gasStatus');
+                        gasEl.textContent = 'Gas: ' + (msg.data.gasPressed ? 'ON' : 'OFF');
+                        gasEl.style.color = msg.data.gasPressed ? '#4CAF50' : '#888';
                         const brakeEl = document.getElementById('brakeStatus');
                         brakeEl.textContent = 'Brake: ' + (msg.data.brakePressed ? 'ON' : 'OFF');
-                        brakeEl.style.color = msg.data.brakePressed ? '#f44336' : '#4CAF50';
+                        brakeEl.style.color = msg.data.brakePressed ? '#f44336' : '#888';
                     }
                 };
 
