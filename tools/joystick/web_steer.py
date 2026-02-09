@@ -93,16 +93,6 @@ HTML_PAGE = """
             min-width: 120px;
             text-align: center;
         }
-        .status {
-            margin-top: 10px;
-            padding: 8px 15px;
-            background: #333;
-            border-radius: 5px;
-            font-size: 14px;
-            text-align: center;
-        }
-        .status.connected { background: #2e7d32; }
-        .status.error { background: #c62828; }
         button {
             padding: 12px 30px;
             font-size: 16px;
@@ -198,7 +188,6 @@ HTML_PAGE = """
             <div class="key-indicator" id="keyLeft">\u2190</div>
             <div class="key-indicator" id="keyRight">\u2192</div>
         </div>
-        <div class="status" id="status">Connecting...</div>
         <div class="telemetry">
             <div class="gauge-container">
                 <div class="pedal-indicator" id="gasIndicator"></div>
@@ -261,8 +250,6 @@ HTML_PAGE = """
         const RAMP_RATE = 0.016;    // ~1s to full at 60fps
         const RETURN_RATE = 0.025;  // ~0.6s return to center
 
-        const steerDisplay = document.getElementById('steerValue');
-        const status = document.getElementById('status');
         const video = document.getElementById('video');
         const keyLeft = document.getElementById('keyLeft');
         const keyRight = document.getElementById('keyRight');
@@ -292,18 +279,12 @@ HTML_PAGE = """
                 steerValue = Math.max(steerValue - RETURN_RATE, targetTorque);
             }
 
-            steerDisplay.textContent = steerValue.toFixed(2);
             keyLeft.classList.toggle('active', keysPressed.left);
             keyRight.classList.toggle('active', keysPressed.right);
 
             requestAnimationFrame(updateLoop);
         }
         requestAnimationFrame(updateLoop);
-
-        function setStatus(msg, type) {
-            status.textContent = msg;
-            status.className = 'status ' + (type || '');
-        }
 
         function sendControls() {
             if (dc && dc.readyState === 'open') {
@@ -450,8 +431,6 @@ HTML_PAGE = """
 
         async function start() {
             try {
-                setStatus('Creating connection...');
-
                 pc = new RTCPeerConnection({ sdpSemantics: 'unified-plan' });
 
                 // Add 2 transceivers for 2 video tracks (road, wideRoad)
@@ -469,29 +448,27 @@ HTML_PAGE = """
                         // mid=0 is road, mid=1 is wideRoad
                         if (mid === '0') {
                             video.srcObject = stream;
-                            setStatus('Road camera connected', 'connected');
                         } else if (mid === '1') {
                             wide.srcObject = stream;
-                            setStatus('All cameras connected', 'connected');
                         }
                     }
                 });
 
                 pc.addEventListener('connectionstatechange', () => {
                     if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed') {
-                        setStatus('Connection lost', 'error');
+                        console.log('Connection lost');
                     }
                 });
 
                 // Create data channel for controls
                 dc = pc.createDataChannel('data', { ordered: true });
                 dc.onopen = () => {
-                    setStatus('Connected - steering active', 'connected');
+                    console.log('Connected - steering active');
                     sendInterval = setInterval(sendControls, 50);
                 };
                 dc.onclose = () => {
                     clearInterval(sendInterval);
-                    setStatus('Data channel closed', 'error');
+                    console.log('Data channel closed');
                 };
                 dc.onmessage = (evt) => {
                     const msg = JSON.parse(new TextDecoder().decode(evt.data));
@@ -538,8 +515,6 @@ HTML_PAGE = """
                     }
                 });
 
-                setStatus('Negotiating...');
-
                 // Send offer to server
                 const response = await fetch('/offer', {
                     method: 'POST',
@@ -552,11 +527,8 @@ HTML_PAGE = """
                 const answer = await response.json();
                 await pc.setRemoteDescription(answer);
 
-                setStatus('Waiting for video...', 'connected');
-
             } catch (err) {
-                setStatus('Error: ' + err.message, 'error');
-                console.error(err);
+                console.error('Error:', err);
             }
         }
 
