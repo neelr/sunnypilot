@@ -32,46 +32,6 @@ from lib.telemetry import load_telemetry, interpolate_telemetry, get_frame_range
 from lib.renderer import BatchRenderer
 
 
-def compress_events(events: list[dict]) -> list[dict]:
-    """
-    Compress events by merging quick press+release pairs into KeyTyped events.
-    A press followed by release within 5 events becomes KeyTyped.
-    """
-    result = []
-    i = 0
-    while i < len(events):
-        event = events[i]
-
-        # Look for Keyboard press events
-        if event.get('type') == 'Keyboard' and event.get('is_press') is True:
-            keycode = event['keycode']
-
-            # Look ahead for matching release within 5 events
-            found_release = False
-            for j in range(i + 1, min(i + 6, len(events))):
-                candidate = events[j]
-                if (candidate.get('type') == 'Keyboard' and
-                    candidate.get('keycode') == keycode and
-                    candidate.get('is_press') is False):
-                    # Found matching release - merge into KeyTyped
-                    result.append({'type': 'KeyTyped', 'keycode': keycode})
-                    # Skip to after the release, but include events in between
-                    for k in range(i + 1, j):
-                        result.append(events[k])
-                    i = j + 1
-                    found_release = True
-                    break
-
-            if not found_release:
-                result.append(event)
-                i += 1
-        else:
-            result.append(event)
-            i += 1
-
-    return result
-
-
 def extract_frames(video_path: Path, fps: float = 20.0) -> list[tuple[float, np.ndarray]]:
     """
     Extract all frames from a video file.
@@ -137,10 +97,8 @@ def render_chunk(
 
     print(f"    Rendering {len(road_frames)} frames with {num_workers} workers...")
 
-    # Track key states for event generation
+    # Track events for output
     events = []
-    prev_keys_left = False
-    prev_keys_right = False
 
     # Use renderer with context manager for proper cleanup
     with BatchRenderer(template_path, frames_dir, num_workers) as renderer:
@@ -156,13 +114,11 @@ def render_chunk(
             # Get telemetry for this frame index
             telem = interpolate_telemetry(telemetry, i)
 
-            # Generate keyboard events for key state changes
-            if telem.keys_left != prev_keys_left:
-                events.append({'type': 'Keyboard', 'keycode': 'Left', 'is_press': telem.keys_left})
-                prev_keys_left = telem.keys_left
-            if telem.keys_right != prev_keys_right:
-                events.append({'type': 'Keyboard', 'keycode': 'Right', 'is_press': telem.keys_right})
-                prev_keys_right = telem.keys_right
+            # Emit KeyTyped for each frame where key is held
+            if telem.keys_left:
+                events.append({'type': 'KeyTyped', 'keycode': 'Left'})
+            if telem.keys_right:
+                events.append({'type': 'KeyTyped', 'keycode': 'Right'})
 
             # Add frame event
             events.append({'type': 'Frame', 'frame_counter': i})
@@ -182,9 +138,6 @@ def render_chunk(
         # Render all frames (progress shown via tqdm in render_batch)
         print("    Queuing frames to workers...")
         all_frame_paths = renderer.render_batch(batch)
-
-    # Apply compression to events (merge quick press+release -> KeyTyped)
-    events = compress_events(events)
 
     # Write events.json
     events_path = chunk_output_dir / 'events.json'
