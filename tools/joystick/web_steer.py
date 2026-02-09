@@ -279,9 +279,6 @@ HTML_PAGE = """
                 steerValue = Math.max(steerValue - RETURN_RATE, targetTorque);
             }
 
-            keyLeft.classList.toggle('active', keysPressed.left);
-            keyRight.classList.toggle('active', keysPressed.right);
-
             requestAnimationFrame(updateLoop);
         }
         requestAnimationFrame(updateLoop);
